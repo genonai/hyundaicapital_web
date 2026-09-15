@@ -1,0 +1,5 @@
+# 이미지에 이미 있는 것(fastapi, uvicorn, httpx, pydantic, pydantic-settings)은 적지 않는다 — 다시 적으면 버전 충돌만 생긴다.
+langgraph==0.2.56     # StateGraph, interrupt_before, MemorySaver, StreamWriter
+cryptography          # 암호화 적재 VDB 청크 복호화 (AES-GCM, PBKDF2)
+pymysql               # MySQL 조회 (순수 파이썬, 컴파일 휠 불필요)
+weaviate-client==4.15.3   # Weaviate gRPC 검색. grpcio 가 딸려오는데 공개 PyPI 에서 받는다
