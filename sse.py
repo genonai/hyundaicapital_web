@@ -30,7 +30,7 @@ def sse(event: str, data) -> str:
 def agent_select_frame() -> str:
     """에이전트 선택 UI. 사용자가 고르면 다음 요청 body 에 이렇게 담겨 온다 (schemas.HumanInput).
         {"question": "", "stream": true,
-         "humanInput": {"interactionId": "...", "action": "submit", "values": {"selected": ["legal"]}}}
+         "humanInput": {"interactionId": "...", "action": "submit", "values": {"selected": ["finance"]}}}
     우리는 대화를 세션 헤더로 찾으므로 interactionId 는 매번 새로 만들어도 된다."""
     interaction_id = str(uuid.uuid4())
     element = HitlElement(

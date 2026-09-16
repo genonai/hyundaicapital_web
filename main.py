@@ -5,7 +5,7 @@
     schemas.py   요청·응답·HITL UI 스키마 (Pydantic)
     sse.py       gen-portal 이 읽는 SSE 프레임 형식
     llm.py       LLM 스트리밍 호출 + tool_calls 조각 모으기
-    rag.py       법률:   임베딩 → Weaviate 하이브리드 검색(파일명 필터) → 복호화
+    rag.py       사전:   임베딩 → Weaviate 하이브리드 검색(파일명 필터) → 복호화
     db.py        부동산: 테이블 스키마, SQL 안전검사, MySQL 실행
     tools.py     툴 스키마(Pydantic → JSON Schema) + 검증 + 실행
     graph.py     LangGraph 노드·간선, interrupt 지점

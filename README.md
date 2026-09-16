@@ -5,13 +5,13 @@
 
 | 에이전트 | 하는 일 | 툴 | 승인 |
 |---|---|---|---|
-| 법률 (노동법) | Weaviate 하이브리드 검색, 파일명에 `LEGAL_FILE_FILTER` 가 들어간 문서만 (Filter RAG) | `search_labor_law(query)` | 없음 |
+| 경제금융용어 사전 | Weaviate 하이브리드 검색, 파일명에 `GLOSSARY_FILE_FILTER` 가 들어간 문서만 (Filter RAG) | `search_finance_glossary(query)` | 없음 |
 | 부동산 분석 (부산시) | 질문 → MySQL SELECT 생성 → **승인** → 실행 → 결과 해설 (Text2SQL) | `query_real_estate_sql(sql)` | **있음** |
 | 일반 대화 | 검색·조회 없이 바로 답한다 | 없음 | 없음 |
 
 ```
 START ─▶ pick ─▶ call_llm ──┬─ tool_calls 없음 ────────────────────────────▶ END
-                    ▲       ├─ tool_calls 있음 · 승인 불필요(법률 검색) ─▶ run_tools ─┐
+                    ▲       ├─ tool_calls 있음 · 승인 불필요(사전 검색) ─▶ run_tools ─┐
                     │       └─ tool_calls 있음 · 승인 필요(SQL 실행) ─▶ approve ─┬─▶ run_tools ─┤
                     │                                                          └─▶ END (거절)  │
                     └────────────── 툴 결과를 넣고 LLM 을 다시 부른다 ─────────────────────────┘
@@ -24,7 +24,7 @@ interrupt_before = ["pick", "approve"]
 | 턴 | 사용자 | 그래프 | LLM | 툴 |
 |---|---|---|---|---|
 | 1 | 질문 | `pick` 앞에서 중단 → 선택 UI | 0회 | 0회 |
-| 2 | 법률 선택 | `pick` → `call_llm` → `run_tools`(검색) → `call_llm` → END | 2회 | 1회 |
+| 2 | 사전 선택 | `pick` → `call_llm` → `run_tools`(검색) → `call_llm` → END | 2회 | 1회 |
 | 2 | 부동산 선택 | `pick` → `call_llm`(SQL 생성) → `approve` 앞에서 중단 → SQL 승인 UI | 1회 | **0회** |
 | 3 | 승인 | `approve` → `run_tools`(SQL 실행) → `call_llm`(해설) → END | 1회 | 1회 |
 | 3 | 거절 | `approve` → END | 0회 | **0회** |
@@ -40,7 +40,7 @@ interrupt_before = ["pick", "approve"]
 | 2 | `schemas.py` | **Pydantic 스키마.** 요청(`ChatRequest`) · 응답(`ChatResponse`) · HITL UI(`ActionData`) |
 | 3 | `sse.py` | gen-portal 이 읽는 SSE 프레임 형식. 선택 UI / 승인·거절 UI 를 `schemas` 로 만든다 |
 | 4 | `llm.py` | LLM 스트리밍 호출. **tool_calls 조각을 모아 완성하는 부분이 핵심** |
-| 5 | `rag.py` | 법률: 임베딩 → Weaviate 하이브리드 검색(파일명 필터) → 복호화 |
+| 5 | `rag.py` | 사전: 임베딩 → Weaviate 하이브리드 검색(파일명 필터) → 복호화 |
 | 6 | `db.py` | 부동산: 테이블 스키마(프롬프트용) · **SQL 안전검사** · MySQL 실행 |
 | 7 | `tools.py` | 툴 인자 Pydantic 모델 → JSON Schema(LLM 에 전달) / 검증(`validate`) / 실행(`run`) |
 | 8 | `graph.py` | LangGraph 노드 4개·간선·interrupt 지점 |
@@ -79,7 +79,7 @@ call_llm 노드                                              llm.stream_chat
 | `HumanInput` | `ChatRequest.humanInput` | `action` 은 `submit` / `cancel` 둘뿐임을 타입으로 고정 |
 | `ChatResponse` | stream 없는 응답 | `{"code", "errMsg", "data": {"text"}}` 규약 |
 | `ActionData` · `HitlElement` | `sse.py` | HITL UI 의 모양(element type, `interactionId` 위치)을 타입으로 문서화 |
-| `SearchLaborLawArgs` · `QueryRealEstateSqlArgs` | `tools.py` | `model_json_schema()` 로 LLM 에 보내는 파라미터 스키마 생성, `model_validate_json()` 으로 LLM 출력 검증 |
+| `SearchFinanceGlossaryArgs` · `QueryRealEstateSqlArgs` | `tools.py` | `model_json_schema()` 로 LLM 에 보내는 파라미터 스키마 생성, `model_validate_json()` 으로 LLM 출력 검증 |
 | `ToolResult` | `tools.run()` → `graph.run_tools` | 툴 결과의 세 갈래(LLM 에 줄 텍스트 / 화면에 보일 텍스트 / 출처)를 명시 |
 | `Settings` | `config.py` | 환경변수 타입 변환(`top_k: int`)과 필수값 검증 |
 
@@ -164,7 +164,7 @@ LLM 이 만든 SQL 을 그대로 실행하므로 이 함수가 유일한 방어�
 ```graphql
 { Get { <Index>(
     hybrid: { query: "연장근로 한도", vector: [...], alpha: 0.5 }
-    where:  { path: ["file_name"], operator: Like, valueText: "*노동법*" }
+    where:  { path: ["file_name"], operator: Like, valueText: "*경제금융용어*" }
     limit: 5
   ) { text file_name i_page chunk_bboxes is_encrypted _additional { score } } } }
 ```
@@ -203,7 +203,7 @@ pip install --no-cache-dir --extra-index-url https://pypi.org/simple -r requirem
 **시작 커맨드** — 비밀이 아닌 설정을 환경변수로 앞에 붙인다.
 
 ```
-GENOS_URL=https://genos.genon.ai LLM_SERVING_ID=1183 LLM_MODEL=GLM-5.3-Flash EMBEDDING_SERVING_ID=10 VDB_INDEX=H05e9c8d715b9478f86293fddde5407c0 LEGAL_FILE_FILTER=근로 DB_HOST=dwmyoung-mysql9.mysql.database.azure.com DB_USER=dwmyoung DB_NAME=db_template uvicorn main:app --host 0.0.0.0 --port $PORT
+GENOS_URL=https://genos.genon.ai LLM_SERVING_ID=1183 LLM_MODEL=GLM-5.3-Flash EMBEDDING_SERVING_ID=10 VDB_INDEX=H05e9c8d715b9478f86293fddde5407c0 GLOSSARY_FILE_FILTER=경제금융용어 DB_HOST=dwmyoung-mysql9.mysql.database.azure.com DB_USER=dwmyoung DB_NAME=db_template uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 
 **환경 변수** — 토큰·비밀번호는 시작 커맨드가 아니라 이 행에 넣는다(암호화 저장된다).
@@ -230,7 +230,7 @@ GENOS_URL=https://genos.genon.ai LLM_SERVING_ID=1183 LLM_MODEL=GLM-5.3-Flash EMB
 | `WEAVIATE_URL` | | 기본 `http://llmops-weaviate-service:8080` (클러스터 내부) |
 | `WEAVIATE_API_KEY` | O | VDB 인증 키 (Read Key) |
 | `VDB_INDEX` | O | VDB 컬렉션 이름 |
-| `LEGAL_FILE_FILTER` | | 법률 검색 파일명 필터. 기본 `노동법` |
+| `GLOSSARY_FILE_FILTER` | | 사전 검색 파일명 필터. 기본 `경제금융용어` |
 | `TOP_K` | | 검색 문서 수. 기본 5 |
 | `HYBRID_ALPHA` | | 하이브리드 가중치. 1=벡터만, 0=키워드만. 기본 0.5 |
 | `DECRYPT_KEY` | | 암호화 적재 VDB 복호화 키(`G__ENCRYPT__KEY`). 기본 `mnc` |

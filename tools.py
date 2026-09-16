@@ -1,6 +1,6 @@
 """툴 — LLM 에게 보여줄 스키마(TOOLS)와, LLM 이 고른 툴을 검증(validate)하고 실행(run)하는 코드.
 
-  search_labor_law(query)       법률 에이전트.   Filter RAG            → rag.py
+  search_finance_glossary(query)  경제금융용어 사전 에이전트. Filter RAG  → rag.py
   query_real_estate_sql(sql)    부동산 에이전트. Text2SQL (MySQL)      → db.py   ← 실행 전 사용자 승인
 
 인자 모양은 Pydantic 모델 하나로 정의하고 두 곳에서 쓴다.
@@ -19,8 +19,8 @@ from config import settings
 
 
 # ───────────────────────── 툴 인자 (LLM 이 채운다) ─────────────────────────
-class SearchLaborLawArgs(BaseModel):
-    query: str = Field(description="검색어. 조문·용어·쟁점이 드러나게 쓴다.")
+class SearchFinanceGlossaryArgs(BaseModel):
+    query: str = Field(description="검색할 경제·금융 용어. 용어·개념이 드러나게 쓴다.")
 
 
 class QueryRealEstateSqlArgs(BaseModel):
@@ -29,12 +29,12 @@ class QueryRealEstateSqlArgs(BaseModel):
 
 # ───────────────────────── LLM 에 보내는 툴 스키마 ─────────────────────────
 TOOLS = {
-    "search_labor_law": {
+    "search_finance_glossary": {
         "type": "function",
         "function": {
-            "name": "search_labor_law",
-            "description": f"노동법 문서를 검색한다. 파일명에 '{settings.legal_file_filter}' 가 들어간 문서만 본다.",
-            "parameters": SearchLaborLawArgs.model_json_schema(),
+            "name": "search_finance_glossary",
+            "description": f"경제금융용어 사전을 검색한다. 파일명에 '{settings.glossary_file_filter}' 가 들어간 문서만 본다.",
+            "parameters": SearchFinanceGlossaryArgs.model_json_schema(),
         },
     },
     "query_real_estate_sql": {
@@ -51,7 +51,7 @@ TOOLS = {
 
 # 툴 이름 → 인자 모델
 ARGS_MODEL = {
-    "search_labor_law": SearchLaborLawArgs,
+    "search_finance_glossary": SearchFinanceGlossaryArgs,
     "query_real_estate_sql": QueryRealEstateSqlArgs,
 }
 
@@ -98,16 +98,20 @@ def describe(tool_call: dict) -> str:
 
 
 # ───────────────────────────── 실행 ─────────────────────────────
-async def run(tool_call: dict) -> ToolResult:
-    """검증을 통과한(그리고 필요하면 승인받은) tool_call 하나를 실행한다."""
+async def run(tool_call: dict, security_level: int) -> ToolResult:
+    """검증을 통과한(그리고 필요하면 승인받은) tool_call 하나를 실행한다.
+
+    security_level 은 로그인한 사용자의 보안 등급이다. 문서 검색은 이 등급 **이하**만 본다.
+    기본값을 두지 않는다 — 빠뜨린 호출이 조용히 전 등급을 검색하는 것이 최악이다."""
     name = tool_call["function"]["name"]
     args = ARGS_MODEL[name].model_validate_json(tool_call["function"]["arguments"])
 
-    if name == "search_labor_law":
-        docs = await rag.hybrid_search(args.query, settings.legal_file_filter, settings.top_k)
+    if name == "search_finance_glossary":
+        docs = await rag.hybrid_search(args.query, settings.glossary_file_filter, settings.top_k,
+                                       security_level)
         return ToolResult(
             content=rag.docs_to_text(docs),
-            display=f"🔎 노동법 문서 검색: {args.query}\n\n",
+            display=f"🔎 경제금융용어 사전 검색: {args.query}\n\n",
             documents=docs,
         )
 

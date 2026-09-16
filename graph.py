@@ -2,7 +2,7 @@
 
     START ─▶ pick ─▶ call_llm ──┬─ tool_calls 없음 ────────────────────────────▶ END
                         ▲       │
-                        │       ├─ tool_calls 있음 · 승인 불필요(법률 검색) ─▶ run_tools ─┐
+                        │       ├─ tool_calls 있음 · 승인 불필요(사전 검색) ─▶ run_tools ─┐
                         │       │                                                        │
                         │       └─ tool_calls 있음 · 승인 필요(SQL 실행) ─▶ approve ─┬─▶ run_tools ─┤
                         │                                                          └─▶ END (거절)  │
@@ -35,12 +35,12 @@ MAX_LLM_CALLS = 4    # LLM ↔ 툴 왕복 상한. LLM 이 툴만 계속 부르�
 
 # 에이전트 정의. 선택 UI(sse.py) 의 선택지도, 시스템 프롬프트도, 쓸 수 있는 툴도 여기서 나온다.
 AGENTS = {
-    "legal": {
-        "label": "법률 (노동법)",
-        "desc": "노동법 문서를 검색해 근거와 함께 답합니다",
-        "system": "당신은 노동법 전문가입니다. 질문을 받으면 먼저 search_labor_law 툴을 **즉시 호출**해 문서를 찾고, "
-                  "그 내용만 근거로 답하세요. 검색할지 사용자에게 묻지 마세요. 문서에 없으면 모른다고 답하세요.",
-        "tools": ["search_labor_law"],
+    "finance": {
+        "label": "경제금융용어 사전",
+        "desc": "경제·금융 용어를 사전에서 찾아 근거와 함께 답합니다",
+        "system": "당신은 경제·금융 용어 전문가입니다. 질문을 받으면 먼저 search_finance_glossary 툴을 **즉시 호출**해 사전을 찾고, "
+                  "그 내용만 근거로 답하세요. 검색할지 사용자에게 묻지 마세요. 사전에 없으면 모른다고 답하세요.",
+        "tools": ["search_finance_glossary"],
     },
     "estate": {
         "label": "부동산 분석 (부산시)",
@@ -65,11 +65,12 @@ AGENTS = {
 
 class State(TypedDict):
     question: str      # 사용자 질문. HITL 응답 턴엔 body 에 question 이 안 오므로 여기 저장해 둔다
-    agent: str         # "legal" | "estate" | "chat".  pick 앞에서 멈춘 뒤 router 가 채운다
+    agent: str         # "finance" | "estate" | "chat".  pick 앞에서 멈춘 뒤 router 가 채운다
     messages: list     # OpenAI 형식 대화 기록 [system, user, assistant, tool, assistant, ...]
     tool_calls: list   # LLM 이 제안했고 검증은 끝났지만 **아직 실행하지 않은** 툴 호출 = pending
     approved: bool     # approve 앞에서 멈춘 뒤 router 가 채운다
     llm_calls: int     # call_llm 을 몇 번 돌았는지
+    security_level: int  # 로그인한 사용자의 보안 등급. 문서 검색이 이 등급 이하만 보게 한다. 매 턴 router 가 갱신한다
 
 
 # ───────────────────────────── 노드 ─────────────────────────────
@@ -137,7 +138,7 @@ async def run_tools(state: State, writer: StreamWriter) -> dict:
     """pending 툴을 하나씩 실행하고 결과를 tool 메시지로 넣는다. 다음은 다시 call_llm 이다."""
     messages = list(state["messages"])
     for tool_call in state["tool_calls"]:
-        result = await tools.run(tool_call)
+        result = await tools.run(tool_call, state["security_level"])
 
         if result.display:
             writer({"event": "token", "data": result.display})               # 사용자 화면

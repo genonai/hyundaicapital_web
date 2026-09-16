@@ -9,7 +9,7 @@
   4. data: [DONE] 이 오면 스트림 끝. pending 에 모인 툴 호출이 있으면 그때 한 번 내보낸다.
 
 ⚠ tool_calls 는 한 번에 오지 않는다. 이렇게 잘게 쪼개져서 온다.
-     {"index":0, "id":"call_x1", "function":{"name":"search_labor_law", "arguments":""}}
+     {"index":0, "id":"call_x1", "function":{"name":"search_finance_glossary", "arguments":""}}
      {"index":0, "function":{"arguments":"{\\"que"}}
      {"index":0, "function":{"arguments":"ry\\": \\"연차"}}
      {"index":0, "function":{"arguments":" 휴가\\"}"}}

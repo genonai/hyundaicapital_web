@@ -1,6 +1,6 @@
-"""Filter RAG (법률 에이전트) — 질문을 임베딩하고, Weaviate 에서 **파일명 필터를 건 하이브리드 검색**을 한다.
+"""Filter RAG (경제금융용어 사전 에이전트) — 질문을 임베딩하고, Weaviate 에서 **파일명 필터를 건 하이브리드 검색**을 한다.
 
-  hybrid_search("연차 휴가", file_name_filter="노동법", top_k=5)
+  hybrid_search("기준금리", file_name_filter="경제금융용어", top_k=5, security_level=6)
     1) 질문 임베딩        GenOS 임베딩 서빙   POST /v1/embeddings          (httpx, 비동기)
     2) 하이브리드 검색    Weaviate gRPC       collection.query.hybrid(...)  (weaviate-client v4, 동기 → 스레드)
     3) 복호화             is_encrypted 인 text 를 AES-GCM 으로 푼다
@@ -70,18 +70,24 @@ def client() -> weaviate.WeaviateClient:
     return _client
 
 
-def _search(query: str, vector: list[float], file_name_filter: str, top_k: int) -> list[dict]:
+def _search(query: str, vector: list[float], file_name_filter: str, top_k: int,
+            security_level: int) -> list[dict]:
     """동기 함수. hybrid_search 가 스레드에서 돌린다 (weaviate-client 는 동기 라이브러리)."""
     collection = client().collections.get(settings.vdb_index)
 
     # hybrid  = 벡터 검색 + 키워드(BM25) 검색을 alpha 로 섞는다. 1.0 = 벡터만, 0.0 = 키워드만
-    # filters = ★ Filter RAG 의 핵심. file_name 에 필터 문자열이 들어간 청크만 대상이 된다
+    # filters = ★ Filter RAG 의 핵심. 두 조건을 AND 로 건다.
+    #   · file_name       필터 문자열이 들어간 문서만
+    #   · security_level  사용자 등급 **이하**만 (레벨 6 이면 0~6). 등급이 높을수록 민감한 문서다.
+    #     security_level 프로퍼티가 없는(=null) 청크는 less_or_equal 에 걸리지 않아 **제외**된다.
+    #     검색 결과가 통째로 비면 VDB 에 그 프로퍼티가 적재됐는지부터 본다.
     result = collection.query.hybrid(
         query=query,
         vector=vector,
         alpha=settings.hybrid_alpha,
         limit=top_k,
-        filters=Filter.by_property("file_name").like(f"*{file_name_filter}*"),
+        filters=(Filter.by_property("file_name").like(f"*{file_name_filter}*")
+                 & Filter.by_property("security_level").less_or_equal(security_level)),
         return_metadata=MetadataQuery(score=True),
     )
 
@@ -99,9 +105,11 @@ def _search(query: str, vector: list[float], file_name_filter: str, top_k: int) 
     return docs
 
 
-async def hybrid_search(query: str, file_name_filter: str, top_k: int) -> list[dict]:
+async def hybrid_search(query: str, file_name_filter: str, top_k: int,
+                        security_level: int) -> list[dict]:
+    """security_level 은 기본값을 두지 않는다 — 빠뜨린 호출이 조용히 전 등급을 검색하면 안 된다."""
     vector = await embed(query)
-    return await asyncio.to_thread(_search, query, vector, file_name_filter, top_k)
+    return await asyncio.to_thread(_search, query, vector, file_name_filter, top_k, security_level)
 
 
 def _json_safe(value):

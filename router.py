@@ -24,7 +24,11 @@ genportal-api 가 붙인 헤더를 게이트웨이가 화이트리스트로 골�
       외부 인증키로 직접 부르면 게이트웨이(AuthKeyBearer._SUBJECT_SCOPE_HEADERS)가 subject 헤더를
       지우므로 매 요청이 새 대화가 된다. 그래서 외부 클라이언트(hyundaicapital_front)는 스크럽
       목록에 없는 커스텀 헤더 x-hc-session-id 로 세션을 실어 보낸다 — 게이트웨이는 그 외의 헤더는
-      그대로 파드까지 흘린다.
+      그대로 파드까지 흘린다. 같은 방식으로 로그인에서 받은 보안 등급이 x-hc-security-level 로 온다.
+
+    🔴 x-hc-security-level 은 **브라우저가 보내는 값이라 위조할 수 있다.** 화면 분기·로깅까지만
+      쓰고, 문서 접근 통제의 근거로 삼으면 안 된다. 실제 집행이 필요해지면 이 코드가 사용자
+      토큰으로 /api/admin/security-level/my-level 을 직접 확인해야 한다.
 
 세션 하나 = LangGraph thread 하나. 같은 세션 ID 로 다시 질문하면 이전 messages 에 이어 붙어
 멀티턴이 된다 (run_turn ①-b). 세션 ID 가 매 요청 바뀌면 매번 새 대화가 된다.
@@ -47,6 +51,9 @@ from sse import agent_select_frame, approve_frame, sse
 
 router = APIRouter()
 
+# 보안 등급 헤더가 없을 때 쓰는 값. 가장 낮은 등급 = 가장 적게 보인다.
+MIN_SECURITY_LEVEL = 0
+
 
 @router.get("/health")
 async def health():
@@ -56,7 +63,9 @@ async def health():
 @router.post("/chat")
 async def chat(body: ChatRequest, request: Request,
                session_id: str | None = Header(default=None, alias="x-genos-session-id"),
-               custom_session_id: str | None = Header(default=None, alias="x-hc-session-id")):
+               custom_session_id: str | None = Header(default=None, alias="x-hc-session-id"),
+               # 로그인에서 받은 보안 등급. 문서 검색이 이 등급 이하만 보게 한다 (rag.py).
+               security_level: int | None = Header(default=None, alias="x-hc-security-level")):
     log_genos_headers(request)
     question = body.question.strip()
 
@@ -85,8 +94,13 @@ async def chat(body: ChatRequest, request: Request,
     # 매 턴이 새 대화가 되어 HITL 2턴째가 이어지지 않는다.
     thread_id = (session_id or (custom_session_id or "").strip()
                  or body.sessionId.strip() or str(uuid.uuid4()))
+
+    # 헤더가 없으면 **최저 등급(0)** 으로 본다. 없을 때 전 등급을 열어 주면 헤더를 빼는 것만으로
+    # 통제가 풀린다 — 모르면 막는 쪽이 맞다.
+    level = MIN_SECURITY_LEVEL if security_level is None else security_level
+
     return StreamingResponse(
-        run_turn(thread_id, body),
+        run_turn(thread_id, body, level),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no"},   # 앞단 nginx 가 SSE 를 모아 한 번에 보내는 것을 막는다
     )
@@ -97,13 +111,17 @@ def log_genos_headers(request: Request) -> None:
     토큰류(access-token, authorization)는 값 대신 길이만 찍는다. 컨테이너 로그에서 `[total-example] 헤더` 로 찾는다."""
     seen = {}
     for name, value in request.headers.items():
-        if name.startswith("x-genos-") or name in ("x-hc-session-id", "traceparent", "baggage", "authorization"):
+        if (name.startswith("x-genos-") or name.startswith("x-hc-")
+                or name in ("traceparent", "baggage", "authorization")):
             seen[name] = f"<{len(value)}자, 값 생략>" if ("token" in name or name == "authorization") else value
     print(f"[total-example] 헤더 {seen}", flush=True)
 
 
-async def run_turn(session_id: str, body: ChatRequest):
-    """한 턴 = HTTP 요청 하나. 그래프를 (이어서) 돌리고 SSE 프레임을 yield 한다."""
+async def run_turn(session_id: str, body: ChatRequest, security_level: int):
+    """한 턴 = HTTP 요청 하나. 그래프를 (이어서) 돌리고 SSE 프레임을 yield 한다.
+
+    security_level 은 턴마다 헤더에서 새로 온다. 체크포인트에 남은 값을 그대로 쓰면
+    같은 세션에서 등급이 바뀌었을 때(재로그인) 옛 등급으로 검색하므로 **매 턴 덮어쓴다.**"""
     thread = {"configurable": {"thread_id": session_id}}    # 이 세션의 체크포인트를 가리킨다
     human_input = body.humanInput
 
@@ -126,14 +144,16 @@ async def run_turn(session_id: str, body: ChatRequest):
                     thread,
                     {"question": question,
                      "messages": previous["messages"] + [{"role": "user", "content": question}],
-                     "tool_calls": [], "approved": False, "llm_calls": 0},
+                     "tool_calls": [], "approved": False, "llm_calls": 0,
+                     "security_level": security_level},
                     as_node="pick",
                 )
                 graph_input = None
             else:
                 # ①-a 새 대화: 상태를 처음부터 만든다. pick 앞에서 멈춰 에이전트 선택 UI 를 띄운다.
                 graph_input = {"question": question, "agent": "", "messages": [],
-                               "tool_calls": [], "approved": False, "llm_calls": 0}
+                               "tool_calls": [], "approved": False, "llm_calls": 0,
+                               "security_level": security_level}
         else:
             # ② HITL 응답: 어느 노드 앞에서 멈춰 있었는지 보고, 사용자 입력을 채워 넣는다.
             snapshot = await GRAPH.aget_state(thread)
@@ -151,10 +171,11 @@ async def run_turn(session_id: str, body: ChatRequest):
                     return
                 selected = human_input.values.selected
                 agent = selected[0] if selected and selected[0] in AGENTS else "chat"
-                await GRAPH.aupdate_state(thread, {"agent": agent})
+                await GRAPH.aupdate_state(thread, {"agent": agent, "security_level": security_level})
 
             elif stopped_before == "approve":
-                await GRAPH.aupdate_state(thread, {"approved": human_input.action == "submit"})
+                await GRAPH.aupdate_state(thread, {"approved": human_input.action == "submit",
+                                                   "security_level": security_level})
 
             graph_input = None    # None = 새 입력 없이, 멈춘 지점부터 이어서 실행한다
 

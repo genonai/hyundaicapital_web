@@ -23,13 +23,13 @@ class Settings(BaseSettings):
     embedding_serving_id: str         # 임베딩 모델서빙 ID
     embedding_bearer_token: str       # 그 서빙의 인증 키
 
-    # ── Weaviate ── 법률 에이전트의 Filter RAG
+    # ── Weaviate ── 경제금융용어 사전 에이전트의 Filter RAG
     #   호스트·포트는 여기 두지 않고 rag.py 에 상수로 박아 뒀다. 쿠버네티스가 네임스페이스 안 서비스마다
     #   `<서비스명>_PORT=tcp://10.x.x.x:50051` 같은 환경변수를 자동 주입하는데, WEAVIATE_GRPC_PORT 가
     #   정확히 그 이름과 겹쳐서 int 파싱에 실패하며 부팅이 죽었다 (실제로 겪음).
     weaviate_api_key: str             # VDB 상세 > 인증 키 > Read Key
     vdb_index: str                    # 컬렉션 이름. 예) H05e9c8d715b9...
-    legal_file_filter: str = "노동법"  # 파일명에 이 글자가 들어간 문서만 검색한다
+    glossary_file_filter: str = "경제금융용어"  # 파일명에 이 글자가 들어간 문서만 검색한다
     top_k: int = 5                    # 검색 문서 수
     hybrid_alpha: float = 0.5         # 1.0 = 벡터만, 0.0 = 키워드만
     decrypt_key: str = "mnc"          # 암호화 적재 VDB 의 복호화 키

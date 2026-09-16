@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 # ───────────────────────────── 요청 ─────────────────────────────
 class HumanInputValues(BaseModel):
-    selected: list[str] = []      # single-select 에서 고른 값. 예) ["legal"]
+    selected: list[str] = []      # single-select 에서 고른 값. 예) ["finance"]
     customInput: str = ""         # 「직접 입력」 칸에 쓴 글
 
 
