@@ -36,6 +36,7 @@ class ChatRequest(BaseModel):
     question: str = ""
     stream: bool = False
     humanInput: HumanInput | None = None
+    sessionId: str = ""    # 외부 인증키 직접 호출용. 게이트웨이가 x-genos-session-id 헤더를 지우므로 바디로 받는다
 
 
 # ──────────────────────── 응답 (stream 없을 때) ────────────────────────

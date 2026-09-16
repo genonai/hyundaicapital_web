@@ -21,7 +21,13 @@ genportal-api 가 붙인 헤더를 게이트웨이가 화이트리스트로 골�
       달라질 수 있어서, /chat 이 실제로 받은 x-genos-* 헤더를 매 요청 로그로 찍는다 (log_genos_headers).
       배포 후 앱 채팅에서 한 번 보내고 컨테이너 로그의 `[total-example] 헤더` 줄을 보면 확정된다.
     ⚠ x-genos-session-id 는 genportal-api → 게이트웨이 → 코드서빙 내부 구간에서만 유지된다.
-      외부 인증키로 직접 부르면 게이트웨이가 subject 헤더를 지우므로 매 요청이 새 대화가 된다.
+      외부 인증키로 직접 부르면 게이트웨이(AuthKeyBearer._SUBJECT_SCOPE_HEADERS)가 subject 헤더를
+      지우므로 매 요청이 새 대화가 된다. 그래서 외부 클라이언트(hyundaicapital_front)는 스크럽
+      목록에 없는 커스텀 헤더 x-hc-session-id 로 세션을 실어 보낸다 — 게이트웨이는 그 외의 헤더는
+      그대로 파드까지 흘린다.
+
+세션 하나 = LangGraph thread 하나. 같은 세션 ID 로 다시 질문하면 이전 messages 에 이어 붙어
+멀티턴이 된다 (run_turn ①-b). 세션 ID 가 매 요청 바뀌면 매번 새 대화가 된다.
 
 한 대화의 흐름 (부동산)
     턴1  질문          → 그래프가 pick 앞에서 멈춤                         → 에이전트 선택 UI
@@ -49,7 +55,8 @@ async def health():
 
 @router.post("/chat")
 async def chat(body: ChatRequest, request: Request,
-               session_id: str | None = Header(default=None, alias="x-genos-session-id")):
+               session_id: str | None = Header(default=None, alias="x-genos-session-id"),
+               custom_session_id: str | None = Header(default=None, alias="x-hc-session-id")):
     log_genos_headers(request)
     question = body.question.strip()
 
@@ -71,9 +78,15 @@ async def chat(body: ChatRequest, request: Request,
         except Exception as exc:
             return ChatResponse(code=1, errMsg=str(exc), data=ChatResponseData(text=""))
 
-    # ①② 스트리밍. 세션 ID = 헤더. 외부에서 직접 부르면 헤더가 없으니 그때만 새로 만든다.
+    # ①② 스트리밍.
+    # x-genos-session-id(genportal 경유) → x-hc-session-id(외부 인증키 직접 호출)
+    # → 바디 sessionId(폴백) → 신규 순으로 세션을 정한다.
+    # 인증키 경로에서는 게이트웨이가 x-genos-session-id 를 지우므로 그 헤더만 보면
+    # 매 턴이 새 대화가 되어 HITL 2턴째가 이어지지 않는다.
+    thread_id = (session_id or (custom_session_id or "").strip()
+                 or body.sessionId.strip() or str(uuid.uuid4()))
     return StreamingResponse(
-        run_turn(session_id or str(uuid.uuid4()), body),
+        run_turn(thread_id, body),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no"},   # 앞단 nginx 가 SSE 를 모아 한 번에 보내는 것을 막는다
     )
@@ -84,7 +97,7 @@ def log_genos_headers(request: Request) -> None:
     토큰류(access-token, authorization)는 값 대신 길이만 찍는다. 컨테이너 로그에서 `[total-example] 헤더` 로 찾는다."""
     seen = {}
     for name, value in request.headers.items():
-        if name.startswith("x-genos-") or name in ("traceparent", "baggage", "authorization"):
+        if name.startswith("x-genos-") or name in ("x-hc-session-id", "traceparent", "baggage", "authorization"):
             seen[name] = f"<{len(value)}자, 값 생략>" if ("token" in name or name == "authorization") else value
     print(f"[total-example] 헤더 {seen}", flush=True)
 
@@ -97,9 +110,30 @@ async def run_turn(session_id: str, body: ChatRequest):
     try:
         # ── 1. 그래프에 무엇을 넣을지 정한다 ─────────────────────────────────────
         if human_input is None:
-            # ① 새 질문: 상태를 처음부터 만든다. (같은 세션의 이전 대화는 덮어쓴다)
-            graph_input = {"question": body.question.strip(), "agent": "", "messages": [],
-                           "tool_calls": [], "approved": False, "llm_calls": 0}
+            question = body.question.strip()
+            snapshot = await GRAPH.aget_state(thread)
+            previous = snapshot.values or {}
+
+            if previous.get("agent") and previous.get("messages"):
+                # ①-b 같은 세션의 **후속 질문**: 이전 대화를 이어간다.
+                #     · messages 를 지우지 않고 user 메시지를 덧붙인다 → LLM 이 앞 턴을 기억한다
+                #     · as_node="pick" = pick 을 방금 지난 것으로 표시 → 에이전트를 다시 묻지 않고
+                #       call_llm 부터 재개한다 (pick 은 messages 를 덮어쓰므로 통과시키면 안 된다)
+                #     · llm_calls 는 턴마다 0 으로 되돌린다. 누적하면 몇 턴 만에 MAX_LLM_CALLS 에 걸린다
+                # ponytail: messages 무한 성장. 대화가 길어져 컨텍스트가 넘치면 여기서 잘라낸다
+                #           (assistant.tool_calls ↔ tool 메시지 짝을 깨지 않게 턴 단위로).
+                await GRAPH.aupdate_state(
+                    thread,
+                    {"question": question,
+                     "messages": previous["messages"] + [{"role": "user", "content": question}],
+                     "tool_calls": [], "approved": False, "llm_calls": 0},
+                    as_node="pick",
+                )
+                graph_input = None
+            else:
+                # ①-a 새 대화: 상태를 처음부터 만든다. pick 앞에서 멈춰 에이전트 선택 UI 를 띄운다.
+                graph_input = {"question": question, "agent": "", "messages": [],
+                               "tool_calls": [], "approved": False, "llm_calls": 0}
         else:
             # ② HITL 응답: 어느 노드 앞에서 멈춰 있었는지 보고, 사용자 입력을 채워 넣는다.
             snapshot = await GRAPH.aget_state(thread)
