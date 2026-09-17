@@ -19,6 +19,9 @@
   · guarded import — opentelemetry 가 안 깔려 있어도 부팅은 된다. 코드서빙 pip 미러에 패키지가
     없을 때 앱 전체가 죽는 것이 제일 나쁘다.
   · 트레이싱 실패는 절대 응답에 영향을 주지 않는다. 전부 삼킨다.
+  · span 에 실리는 문자열은 sanitize() 를 지난다 — 자격증명·<think> 블록 제거 (577 법령 에이전트와 동일 규칙).
+    단 질문·답변 원문 자체는 OTEL_COLLECT_INPUT_OUTPUT 이 켜져야 실린다. 마스킹은 유출 면을 줄일 뿐
+    개인정보를 지우지는 못한다.
 
 env (코드서빙 리비전 > 환경 변수)
   OTEL_ENABLED                 기본 false
@@ -29,8 +32,10 @@ env (코드서빙 리비전 > 환경 변수)
   LANGFUSE_SECRET_KEY
   OTEL_COLLECT_INPUT_OUTPUT    기본 false. true 면 질문·답변 **원문**이 Langfuse 에 그대로 쌓인다
 """
+import asyncio
 import base64
 import os
+import re
 import threading
 from contextlib import contextmanager
 
@@ -60,6 +65,67 @@ def collect_io() -> bool:
               G__ENCRYPT__SVC_LOG 로 암호화하는데 여기는 안 한다 — 개발망 디버깅용으로만 켤 것.
               운영에서 상시로 켜야 하면 그때 crypter 를 붙인다."""
     return _env_true("OTEL_COLLECT_INPUT_OUTPUT")
+
+
+# ── sanitize — span 에 실리기 전 자격증명·CoT 제거 (577 law_agent/runtime/telemetry.py 이식) ──
+# dict 키가 이 패턴이면 값을 통째로 버린다.
+_BLOCKED_KEY = re.compile(r"authorization|cookie|password|secret|api[_-]?key|token|^headers$", re.I)
+# 문자열 안의 자격증명 패턴 — Bearer 토큰, OpenAI/Langfuse/GitHub 키.
+_CREDENTIAL = re.compile(
+    r"\b(?:Bearer\s+\S+|sk-(?:or-v1-|lf-)?[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)", re.I)
+_KV_SECRET = re.compile(r"(?i)(authorization|password|api[_-]?key|secret|token)(\s*[=:]\s*)[^\s,;]+")
+_THINK = re.compile(r"<think(?:ing)?>.*?(?:</think(?:ing)?>|$)", re.I | re.S)
+_SECRET_ENV_KEY = re.compile(r"token|key|password|secret|pw", re.I)
+_secret_values: tuple[str, ...] | None = None
+
+
+def _env_secret_values() -> tuple[str, ...]:
+    """비밀로 보이는 환경변수의 값 목록 — 문자열에 그대로 박혀 나가는 걸 치환하기 위해. 1회 계산."""
+    global _secret_values
+    if _secret_values is None:
+        _secret_values = tuple(v for k, v in os.environ.items() if _SECRET_ENV_KEY.search(k) and len(v) >= 8)
+    return _secret_values
+
+
+def sanitize(value, *, _depth: int = 0):
+    """span 에 실릴 값에서 자격증명·<think> 블록을 지운다. 업무 텍스트(질문·답변·SQL)는 보존한다.
+
+    repr(self/config/client) 류는 절대 직렬화하지 않는다 — 비밀이 들어 있을 수 있다."""
+    if _depth > 35:
+        return {"omitted": "nesting_limit"}
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        text = _THINK.sub("[reasoning omitted]", value)
+        for secret in _env_secret_values():
+            text = text.replace(secret, "[redacted]")
+        text = _CREDENTIAL.sub("[redacted]", text)
+        return _KV_SECRET.sub(r"\1\2[redacted]", text)
+    if hasattr(value, "model_dump"):
+        return sanitize(value.model_dump(mode="json"), _depth=_depth + 1)
+    if isinstance(value, dict):
+        return {str(k): sanitize(v, _depth=_depth + 1) for k, v in value.items() if not _BLOCKED_KEY.search(str(k))}
+    if isinstance(value, (list, tuple, set)):
+        return [sanitize(v, _depth=_depth + 1) for v in value]
+    return {"type": type(value).__name__}
+
+
+def _error_message(exc: BaseException) -> str:
+    """status_message 용. repr(exc) 는 게이트웨이 응답 본문(토큰·내부 URL)이 섞여 나올 수 있어 쓰지 않는다."""
+    return f"{type(exc).__name__}: {sanitize(str(exc))[:200]}"
+
+
+def deployment_metadata() -> dict:
+    """GenOS 가 코드서빙 파드에 주입하는 배포 식별자 → Langfuse 에서 리비전별로 걸러 보기 위해.
+    (admin-api code_serving_service.py 가 CODE_SERVING_ID·REVISION_ID·DEPLOYMENT_ID·COMMIT_HASH 를 넣는다)"""
+    def env(name):
+        return os.environ.get(name, "").strip() or None
+    return {
+        "langfuse.observation.metadata.genos.code_serving_id": env("CODE_SERVING_ID"),
+        "langfuse.observation.metadata.genos.revision_id": env("CODE_SERVING_REVISION_ID"),
+        "langfuse.observation.metadata.genos.deployment_id": env("CODE_SERVING_DEPLOYMENT_ID"),
+        "langfuse.observation.metadata.git.commit": env("COMMIT_HASH"),
+    }
 
 
 def service_name() -> str:
@@ -139,7 +205,9 @@ def span(name: str, attributes: dict | None = None):
     """트레이싱 span 컨텍스트. OTel 이 꺼져 있거나 미설치면 no-op(yield None).
 
     안에서 예외가 나면 Langfuse 가 읽는 level=ERROR 로 표시하고 그대로 다시 올린다 —
-    GenOS 본체(genos_otel/middleware.py)와 같은 4줄이다."""
+    GenOS 본체(genos_otel/middleware.py)와 같은 4줄이다.
+    클라이언트가 끊어서 생기는 취소(CancelledError/GeneratorExit)는 실패가 아니라 WARNING "cancelled" —
+    게이트웨이의 "stream closed by client" 와 같은 등급이라 실패 집계를 오염시키지 않는다."""
     tracer = _get_tracer()
     if tracer is None:
         yield None
@@ -148,15 +216,19 @@ def span(name: str, attributes: dict | None = None):
         set_attrs(sp, attributes)
         try:
             yield sp
+        except (asyncio.CancelledError, GeneratorExit):
+            set_attrs(sp, {"langfuse.observation.level": "WARNING",
+                           "langfuse.observation.status_message": "cancelled"})
+            raise
         except Exception as exc:
             from opentelemetry.trace import StatusCode
             try:
-                sp.set_status(StatusCode.ERROR, str(exc))
-                sp.record_exception(exc)
+                sp.set_status(StatusCode.ERROR, type(exc).__name__)
+                sp.record_exception(exc)    # 스택트레이스는 span event — 마스킹 대상 아님(경로·타입만)
             except Exception:
                 pass
             set_attrs(sp, {"langfuse.observation.level": "ERROR",
-                           "langfuse.observation.status_message": repr(exc)})
+                           "langfuse.observation.status_message": _error_message(exc)})
             raise
 
 
@@ -188,6 +260,13 @@ def current_span():
         return None
     from opentelemetry import trace
     return trace.get_current_span()
+
+
+def is_root(sp) -> bool:
+    """이 span 이 트레이스의 루트인가(부모 없음). 게이트웨이가 traceparent 를 넘기기 시작하면 False 가 된다.
+
+    577 규칙: 트레이스 이름은 **루트일 때만** 붙인다 — 상위(게이트웨이·gen-portal)가 붙인 이름을 덮지 않는다."""
+    return sp is not None and getattr(sp, "parent", None) is None
 
 
 def shutdown() -> None:

@@ -39,6 +39,7 @@ genportal-api 가 붙인 헤더를 게이트웨이가 화이트리스트로 골�
     턴3  승인          → approve → run_tools(SQL 실행) → call_llm(해설) → END
          거절          → approve → END
 """
+import asyncio
 import uuid
 
 from fastapi import APIRouter, Header, Request
@@ -133,8 +134,12 @@ async def run_turn(session_id: str, body: ChatRequest, security_level: int):
         "langfuse.session.id": session_id,
         # Langfuse 목록에서 이 서비스 트레이스만 골라 보기 위한 태그. 서비스명을 그대로 쓴다.
         "langfuse.trace.tags": [otel.service_name()],
+        # 트레이스 이름은 이 파드가 루트일 때만. 게이트웨이/gen-portal 이 이미 이름을 붙인 트레이스에
+        # 끼어 들어간 경우(부모 있음)엔 상위 이름을 보존한다 — 577 law_agent 와 같은 규칙.
+        "langfuse.trace.name": otel.service_name() if otel.is_root(turn_span) else None,
         "langfuse.observation.metadata.security_level": security_level,
-        "langfuse.observation.input": body.question if otel.collect_io() else None,
+        "langfuse.observation.input": otel.sanitize(body.question) if otel.collect_io() else None,
+        **otel.deployment_metadata(),    # 리비전·배포·커밋 — Langfuse 에서 배포별로 걸러 본다
     })
 
     try:
@@ -204,11 +209,17 @@ async def run_turn(session_id: str, body: ChatRequest, security_level: int):
         elif stopped_before == "approve":
             yield approve_frame(snapshot.values["tool_calls"])
 
+    except (asyncio.CancelledError, GeneratorExit):
+        # 사용자가 창을 닫거나 중단 — 실패가 아니다. ERROR 로 찍으면 실패율이 부풀려진다.
+        otel.set_attrs(turn_span, {"langfuse.observation.level": "WARNING",
+                                   "langfuse.observation.status_message": "cancelled"})
+        raise
     except Exception as exc:
         # 여기서 예외를 삼키고 SSE error 프레임으로 바꾸므로 span 이 스스로 ERROR 가 되지 않는다.
         # 직접 찍어야 Langfuse 와 관리자 모니터링의 실패 집계(level != ERROR → 성공)에 잡힌다.
+        # repr(exc) 는 LLM 게이트웨이 응답 본문이 섞여 나올 수 있어 마스킹된 메시지를 쓴다.
         otel.set_attrs(turn_span, {"langfuse.observation.level": "ERROR",
-                                   "langfuse.observation.status_message": repr(exc)})
+                                   "langfuse.observation.status_message": otel._error_message(exc)})
         yield sse("error", f"{type(exc).__name__}: {exc}")
 
     yield sse("end", None)

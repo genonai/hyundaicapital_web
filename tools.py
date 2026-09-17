@@ -112,7 +112,7 @@ async def run(tool_call: dict, security_level: int) -> ToolResult:
     with otel.span(f"tool.{name}", {
         "langfuse.observation.type": "tool",
         "langfuse.observation.metadata.security_level": security_level,
-        "langfuse.observation.input": args.model_dump_json() if otel.collect_io() else None,
+        "langfuse.observation.input": otel.sanitize(args.model_dump_json()) if otel.collect_io() else None,
     }) as sp:
         if name == "search_finance_glossary":
             docs = await rag.hybrid_search(args.query, settings.glossary_file_filter, settings.top_k,
@@ -129,7 +129,7 @@ async def run(tool_call: dict, security_level: int) -> ToolResult:
             table = db.rows_to_markdown(rows)
             otel.set_attrs(sp, {
                 "langfuse.observation.metadata.row_count": len(rows),
-                "langfuse.observation.metadata.sql": args.sql if otel.collect_io() else None,
+                "langfuse.observation.metadata.sql": otel.sanitize(args.sql) if otel.collect_io() else None,
             })
             return ToolResult(
                 content=f"실행한 SQL:\n{args.sql}\n\n결과 ({len(rows)}행):\n{table}",

@@ -102,7 +102,7 @@ async def call_llm(state: State, writer: StreamWriter) -> dict:
         "langfuse.observation.metadata.agent": state["agent"],
         "langfuse.observation.metadata.llm_call": state["llm_calls"] + 1,
         "langfuse.observation.input":
-            json.dumps(state["messages"], ensure_ascii=False) if otel.collect_io() else None,
+            json.dumps(otel.sanitize(state["messages"]), ensure_ascii=False) if otel.collect_io() else None,
     }) as sp:
         async for event in llm.stream_chat(state["messages"], tool_schemas):
             if event["type"] == "token":
@@ -111,7 +111,7 @@ async def call_llm(state: State, writer: StreamWriter) -> dict:
             elif event["type"] == "tool_calls":
                 tool_calls = event["tool_calls"]
         otel.set_attrs(sp, {
-            "langfuse.observation.output": answer_text if otel.collect_io() else None,
+            "langfuse.observation.output": otel.sanitize(answer_text) if otel.collect_io() else None,
             # 원문 없이도 "LLM 이 뭘 부르려 했나" 는 보여야 흐름을 읽을 수 있다
             "langfuse.observation.metadata.tool_calls":
                 ", ".join(tc["function"]["name"] for tc in tool_calls) or None,
