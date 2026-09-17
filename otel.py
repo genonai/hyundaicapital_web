@@ -8,10 +8,10 @@
 
     code_serving                       ← 게이트웨이가 만든다
       └── POST http://code-serving-…
-            └── POST /chat             ← FastAPI 자동 계측
-                  └── chat             ← router.run_turn
-                        ├── llm        ← graph.call_llm   (+ httpx 자동 span)
-                        └── tool.xxx   ← tools.run
+            └── POST /chat             ← FastAPI 자동 계측. router.run_turn 이 여기에
+                  │                       session.id·tags 를 얹는다 (span 을 새로 만들지 않는다)
+                  ├── llm              ← graph.call_llm   (+ httpx 자동 span)
+                  └── tool.xxx         ← tools.run
 
 설계
   · 기본 꺼짐 — OTEL_ENABLED=true 일 때만 초기화한다. 그 외에는 모든 헬퍼가 no-op 이라
@@ -22,7 +22,7 @@
 
 env (코드서빙 리비전 > 환경 변수)
   OTEL_ENABLED                 기본 false
-  OTEL_SERVICE_NAME            기본 hyundaicapital
+  OTEL_SERVICE_NAME            기본 hyundaicapital. Langfuse trace 태그(langfuse.trace.tags)로도 쓴다
   OTEL_EXPORTER_OTLP_ENDPOINT  기본 http://langfuse-web:3000/api/public/otel — 뒤에 /v1/traces 를 붙인다
                                ⚠ 환경마다 langfuse-web / langfuse-helm-web 로 갈린다. 확인 후 넣을 것
   LANGFUSE_PUBLIC_KEY          Basic auth. SECRET 과 둘 다 있을 때만 헤더를 붙인다
@@ -30,13 +30,12 @@ env (코드서빙 리비전 > 환경 변수)
   OTEL_COLLECT_INPUT_OUTPUT    기본 false. true 면 질문·답변 **원문**이 Langfuse 에 그대로 쌓인다
 """
 import base64
-import logging
 import os
 import threading
 from contextlib import contextmanager
 
-logger = logging.getLogger("total-example")
-
+# 이 앱은 logging 을 설정하지 않아 logger.info 가 컨테이너 로그에 안 찍힌다.
+# 나머지 파일과 같이 print(flush=True) 로 남긴다 — `[total-example]` 로 grep 된다.
 _TRUE = {"1", "true", "yes", "on"}
 _DEFAULT_ENDPOINT = "http://langfuse-web:3000/api/public/otel"
 
@@ -63,8 +62,12 @@ def collect_io() -> bool:
     return _env_true("OTEL_COLLECT_INPUT_OUTPUT")
 
 
-def _service_name() -> str:
+def service_name() -> str:
     return os.environ.get("OTEL_SERVICE_NAME", "hyundaicapital")
+
+
+def _endpoint() -> str:
+    return os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", _DEFAULT_ENDPOINT).rstrip("/")
 
 
 def _build_tracer():
@@ -76,17 +79,16 @@ def _build_tracer():
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
     global _provider
-    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", _DEFAULT_ENDPOINT).rstrip("/")
-    kwargs = {"endpoint": f"{endpoint}/v1/traces"}
+    kwargs = {"endpoint": f"{_endpoint()}/v1/traces"}
     pub, sec = os.environ.get("LANGFUSE_PUBLIC_KEY"), os.environ.get("LANGFUSE_SECRET_KEY")
     if pub and sec:
         kwargs["headers"] = {"Authorization": "Basic " + base64.b64encode(f"{pub}:{sec}".encode()).decode()}
 
-    provider = TracerProvider(resource=Resource.create({"service.name": _service_name()}))
+    provider = TracerProvider(resource=Resource.create({"service.name": service_name()}))
     provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(**kwargs)))
     trace.set_tracer_provider(provider)
     _provider = provider
-    return trace.get_tracer(_service_name())
+    return trace.get_tracer(service_name())
 
 
 def _get_tracer():
@@ -97,13 +99,16 @@ def _get_tracer():
         if _initialized:
             return _tracer
         if not _enabled():
+            print("[total-example] OTel 꺼짐 (OTEL_ENABLED 미설정)", flush=True)
             _initialized = True
             return None
         try:
             _tracer = _build_tracer()
-            logger.info("OTel tracer initialized (service=%s)", _service_name())
+            pub = "O" if os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY") else "X"
+            print(f"[total-example] OTel 켜짐  service={service_name()}  "
+                  f"endpoint={_endpoint()}  auth={pub}", flush=True)
         except Exception as exc:    # 미설치·초기화 실패 → 트레이싱만 끄고 서비스는 계속 뜬다
-            logger.warning("OTel tracer init failed — tracing disabled: %r", exc)
+            print(f"[total-example] OTel 초기화 실패 — 트레이싱만 끕니다: {exc!r}", flush=True)
             _tracer = None
         _initialized = True
         return _tracer
@@ -124,8 +129,9 @@ def init(app) -> None:
 
         FastAPIInstrumentor.instrument_app(app, excluded_urls="health")
         HTTPXClientInstrumentor().instrument()
+        print("[total-example] OTel 자동계측 완료 (FastAPI, httpx)", flush=True)
     except Exception as exc:
-        logger.warning("OTel auto-instrumentation failed: %r", exc)
+        print(f"[total-example] OTel 자동계측 실패: {exc!r}", flush=True)
 
 
 @contextmanager
@@ -162,7 +168,13 @@ def set_attrs(sp, attributes: dict | None) -> None:
         if value is None:
             continue
         try:
-            sp.set_attribute(key, value if isinstance(value, (str, bool, int, float)) else str(value))
+            if isinstance(value, (list, tuple)):
+                # OTel 은 동일 타입 시퀀스를 허용한다. langfuse.trace.tags 가 문자열 배열을
+                # 요구하므로 str() 로 뭉개면 안 된다 — "['a']" 가 태그 이름이 되어 버린다.
+                value = [str(v) for v in value]
+            elif not isinstance(value, (str, bool, int, float)):
+                value = str(value)
+            sp.set_attribute(key, value)
         except Exception:    # 트레이싱은 응답에 영향을 주지 않는다
             pass
 

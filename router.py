@@ -131,6 +131,8 @@ async def run_turn(session_id: str, body: ChatRequest, security_level: int):
     turn_span = otel.current_span()
     otel.set_attrs(turn_span, {
         "langfuse.session.id": session_id,
+        # Langfuse 목록에서 이 서비스 트레이스만 골라 보기 위한 태그. 서비스명을 그대로 쓴다.
+        "langfuse.trace.tags": [otel.service_name()],
         "langfuse.observation.metadata.security_level": security_level,
         "langfuse.observation.input": body.question if otel.collect_io() else None,
     })
