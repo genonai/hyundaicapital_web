@@ -3,3 +3,10 @@ langgraph==0.2.56     # StateGraph, interrupt_before, MemorySaver, StreamWriter
 cryptography          # 암호화 적재 VDB 청크 복호화 (AES-GCM, PBKDF2)
 pymysql               # MySQL 조회 (순수 파이썬, 컴파일 휠 불필요)
 weaviate-client==4.15.3   # Weaviate gRPC 검색. grpcio 가 딸려오는데 공개 PyPI 에서 받는다
+
+# OTel → Langfuse (otel.py). 설치가 안 돼도 guarded import 라 부팅은 되고 트레이싱만 꺼진다
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-http
+opentelemetry-instrumentation-fastapi
+opentelemetry-instrumentation-httpx

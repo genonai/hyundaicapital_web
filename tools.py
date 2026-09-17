@@ -14,6 +14,7 @@ import asyncio
 from pydantic import BaseModel, Field, ValidationError
 
 import db
+import otel
 import rag
 from config import settings
 
@@ -106,21 +107,33 @@ async def run(tool_call: dict, security_level: int) -> ToolResult:
     name = tool_call["function"]["name"]
     args = ARGS_MODEL[name].model_validate_json(tool_call["function"]["arguments"])
 
-    if name == "search_finance_glossary":
-        docs = await rag.hybrid_search(args.query, settings.glossary_file_filter, settings.top_k,
-                                       security_level)
-        return ToolResult(
-            content=rag.docs_to_text(docs),
-            display=f"🔎 경제금융용어 사전 검색: {args.query}\n\n",
-            documents=docs,
-        )
+    # Weaviate(gRPC)·pymysql 은 자동 계측 대상이 아니라서, 이 span 이 없으면 검색·SQL 이
+    # 몇 초 걸렸는지 아무 데도 안 남는다. 원문류(query·SQL)는 전부 collect_io() 뒤에 둔다.
+    with otel.span(f"tool.{name}", {
+        "langfuse.observation.type": "tool",
+        "langfuse.observation.metadata.security_level": security_level,
+        "langfuse.observation.input": args.model_dump_json() if otel.collect_io() else None,
+    }) as sp:
+        if name == "search_finance_glossary":
+            docs = await rag.hybrid_search(args.query, settings.glossary_file_filter, settings.top_k,
+                                           security_level)
+            otel.set_attrs(sp, {"langfuse.observation.metadata.doc_count": len(docs)})
+            return ToolResult(
+                content=rag.docs_to_text(docs),
+                display=f"🔎 경제금융용어 사전 검색: {args.query}\n\n",
+                documents=docs,
+            )
 
-    if name == "query_real_estate_sql":
-        rows = await asyncio.to_thread(db.run_select, args.sql)     # pymysql 은 동기 → 스레드에서 돈다
-        table = db.rows_to_markdown(rows)
-        return ToolResult(
-            content=f"실행한 SQL:\n{args.sql}\n\n결과 ({len(rows)}행):\n{table}",
-            display=f"📊 {len(rows)}행 조회\n\n{table}\n\n",
-        )
+        if name == "query_real_estate_sql":
+            rows = await asyncio.to_thread(db.run_select, args.sql)     # pymysql 은 동기 → 스레드에서 돈다
+            table = db.rows_to_markdown(rows)
+            otel.set_attrs(sp, {
+                "langfuse.observation.metadata.row_count": len(rows),
+                "langfuse.observation.metadata.sql": args.sql if otel.collect_io() else None,
+            })
+            return ToolResult(
+                content=f"실행한 SQL:\n{args.sql}\n\n결과 ({len(rows)}행):\n{table}",
+                display=f"📊 {len(rows)}행 조회\n\n{table}\n\n",
+            )
 
-    raise ValueError(f"알 수 없는 툴: {name}")
+        raise ValueError(f"알 수 없는 툴: {name}")

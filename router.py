@@ -45,6 +45,7 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import StreamingResponse
 
 import llm
+import otel
 from graph import AGENTS, GRAPH
 from schemas import ChatRequest, ChatResponse, ChatResponseData
 from sse import agent_select_frame, approve_frame, sse
@@ -125,6 +126,15 @@ async def run_turn(session_id: str, body: ChatRequest, security_level: int):
     thread = {"configurable": {"thread_id": session_id}}    # 이 세션의 체크포인트를 가리킨다
     human_input = body.humanInput
 
+    # 이 턴의 root span 은 FastAPI 자동 계측이 이미 열어 뒀다. 새로 만들지 않고 거기에 얹는다.
+    # session.id 를 넣어야 Langfuse 에서 한 대화의 여러 턴이 묶여 보인다.
+    turn_span = otel.current_span()
+    otel.set_attrs(turn_span, {
+        "langfuse.session.id": session_id,
+        "langfuse.observation.metadata.security_level": security_level,
+        "langfuse.observation.input": body.question if otel.collect_io() else None,
+    })
+
     try:
         # ── 1. 그래프에 무엇을 넣을지 정한다 ─────────────────────────────────────
         if human_input is None:
@@ -193,6 +203,10 @@ async def run_turn(session_id: str, body: ChatRequest, security_level: int):
             yield approve_frame(snapshot.values["tool_calls"])
 
     except Exception as exc:
+        # 여기서 예외를 삼키고 SSE error 프레임으로 바꾸므로 span 이 스스로 ERROR 가 되지 않는다.
+        # 직접 찍어야 Langfuse 와 관리자 모니터링의 실패 집계(level != ERROR → 성공)에 잡힌다.
+        otel.set_attrs(turn_span, {"langfuse.observation.level": "ERROR",
+                                   "langfuse.observation.status_message": repr(exc)})
         yield sse("error", f"{type(exc).__name__}: {exc}")
 
     yield sse("end", None)

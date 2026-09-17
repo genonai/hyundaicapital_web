@@ -21,6 +21,7 @@
   남겨 둬야 멈춘 노드부터 이어갈 수 있다. thread_id = 채팅 세션 ID 로 저장한다.
   ⚠ MemorySaver 는 프로세스 메모리다. 코드서빙 복제본을 **1 로 고정**해야 한다.
 """
+import json
 from typing import TypedDict
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -29,6 +30,7 @@ from langgraph.types import StreamWriter
 
 import db
 import llm
+import otel
 import tools
 
 MAX_LLM_CALLS = 4    # LLM ↔ 툴 왕복 상한. LLM 이 툴만 계속 부르는 무한 루프를 막는다.
@@ -94,12 +96,26 @@ async def call_llm(state: State, writer: StreamWriter) -> dict:
     # 1) 스트리밍. 텍스트는 즉시 밖으로, tool_calls 는 스트림 끝에 완성본이 한 번 온다.
     answer_text = ""
     tool_calls = []
-    async for event in llm.stream_chat(state["messages"], tool_schemas):
-        if event["type"] == "token":
-            answer_text += event["text"]
-            writer({"event": "token", "data": event["text"]})      # → router 가 SSE 로 내보낸다
-        elif event["type"] == "tool_calls":
-            tool_calls = event["tool_calls"]
+    # span 안에서 돌리면 llm.py 의 httpx 호출이 이 밑에 자동으로 붙는다 (HTTPXClientInstrumentor).
+    with otel.span("llm", {
+        "langfuse.observation.type": "generation",
+        "langfuse.observation.metadata.agent": state["agent"],
+        "langfuse.observation.metadata.llm_call": state["llm_calls"] + 1,
+        "langfuse.observation.input":
+            json.dumps(state["messages"], ensure_ascii=False) if otel.collect_io() else None,
+    }) as sp:
+        async for event in llm.stream_chat(state["messages"], tool_schemas):
+            if event["type"] == "token":
+                answer_text += event["text"]
+                writer({"event": "token", "data": event["text"]})      # → router 가 SSE 로 내보낸다
+            elif event["type"] == "tool_calls":
+                tool_calls = event["tool_calls"]
+        otel.set_attrs(sp, {
+            "langfuse.observation.output": answer_text if otel.collect_io() else None,
+            # 원문 없이도 "LLM 이 뭘 부르려 했나" 는 보여야 흐름을 읽을 수 있다
+            "langfuse.observation.metadata.tool_calls":
+                ", ".join(tc["function"]["name"] for tc in tool_calls) or None,
+        })
 
     # 2) LLM 이 만든 인자를 검증한다 (Pydantic). SQL 은 조회 전용 검사 + LIMIT 부착까지.
     #    통과하지 못한 호출은 버리고 사유를 사용자에게 알린다 → 승인 UI 없이 그냥 끝난다.
