@@ -18,7 +18,7 @@ genportal-api 가 붙인 헤더를 게이트웨이가 화이트리스트로 골�
     traceparent / baggage      OTel 추적           안 씀. aiohttp 계측이 자동으로 붙인다
 
     ⚠ 위 목록은 소스(GenOS 2026-05 기준)에서 읽은 것이다. 버전에 따라 x-genos-chat-service-id 가 추가되는 등
-      달라질 수 있어서, /chat 이 실제로 받은 x-genos-* 헤더를 매 요청 로그로 찍는다 (log_genos_headers).
+      달라질 수 있어서, /chat 이 실제로 받은 헤더를 **전부** 매 요청 로그로 찍는다 (log_headers).
       배포 후 앱 채팅에서 한 번 보내고 컨테이너 로그의 `[total-example] 헤더` 줄을 보면 확정된다.
     ⚠ x-genos-session-id 는 genportal-api → 게이트웨이 → 코드서빙 내부 구간에서만 유지된다.
       외부 인증키로 직접 부르면 게이트웨이(AuthKeyBearer._SUBJECT_SCOPE_HEADERS)가 subject 헤더를
@@ -56,6 +56,9 @@ router = APIRouter()
 # 보안 등급 헤더가 없을 때 쓰는 값. 가장 낮은 등급 = 가장 적게 보인다.
 MIN_SECURITY_LEVEL = 0
 
+# 헤더 로그에 찍는 값의 최대 길이. 넘으면 앞부분만 남긴다 — 긴 토큰·JSON 헤더가 로그를 덮는 것을 막는다.
+MAX_HEADER_LOG = 120
+
 
 @router.get("/health")
 async def health():
@@ -68,7 +71,7 @@ async def chat(body: ChatRequest, request: Request,
                custom_session_id: str | None = Header(default=None, alias="x-hc-session-id"),
                # 로그인에서 받은 보안 등급. 문서 검색이 이 등급 이하만 보게 한다 (rag.py).
                security_level: int | None = Header(default=None, alias="x-hc-security-level")):
-    log_genos_headers(request)
+    log_headers(request)
     question = body.question.strip()
 
     # ③ 「검증」 버튼. 이 응답만 보고 통과 여부를 정한다.
@@ -108,14 +111,19 @@ async def chat(body: ChatRequest, request: Request,
     )
 
 
-def log_genos_headers(request: Request) -> None:
-    """이 요청에 실려 온 x-genos-* 헤더를 로그에 남긴다 — 위 목록이 실제로 파드까지 오는지 눈으로 확인하는 용도.
-    토큰류(access-token, authorization)는 값 대신 길이만 찍는다. 컨테이너 로그에서 `[total-example] 헤더` 로 찾는다."""
-    seen = {}
-    for name, value in request.headers.items():
-        if (name.startswith("x-genos-") or name.startswith("x-hc-")
-                or name in ("traceparent", "baggage", "authorization")):
-            seen[name] = f"<{len(value)}자, 값 생략>" if ("token" in name or name == "authorization") else value
+def log_headers(request: Request) -> None:
+    """이 요청에 실려 온 헤더를 **전부** 로그에 남긴다 — 위 목록이 실제로 파드까지 오는지,
+    게이트웨이가 무엇을 지우고 무엇을 흘리는지 눈으로 확인하는 용도.
+    토큰류(access-token, authorization, cookie)는 값 대신 길이만, 그 외 긴 값은 앞부분만 찍는다.
+    컨테이너 로그에서 `[total-example] 헤더` 로 찾는다."""
+    def shown(name: str, value: str) -> str:
+        if "token" in name or name in ("authorization", "cookie"):
+            return f"<{len(value)}자, 값 생략>"
+        if len(value) > MAX_HEADER_LOG:
+            return f"{value[:MAX_HEADER_LOG]}…<총 {len(value)}자>"
+        return value
+
+    seen = {name: shown(name, value) for name, value in request.headers.items()}
     print(f"[total-example] 헤더 {seen}", flush=True)
 
 
