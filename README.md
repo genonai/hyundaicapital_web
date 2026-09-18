@@ -110,10 +110,22 @@ HITL 응답 턴에는 `question` 이 빈 문자열이다. 나머지 문맥은 ge
 | `x-genos-workflow-build-id` | 워크플로우 빌드 ID | 안 씀 |
 | `x-genos-auth-key-id` | 인증키 ID (외부 인증키 호출일 때만) | 안 씀 |
 | `x-genos-access-token` | 서비스 토큰 (게이트웨이 호출에 Bearer 가 있을 때만). 내부 API 호출 시 전달용 | 안 씀 |
-| `traceparent` / `baggage` | OTel 추적 | 안 씀 |
+| `traceparent` / `tracestate` | W3C 추적 컨텍스트 | 코드가 직접 읽진 않지만 **FastAPI 자동계측이 받아 트레이스를 잇는다** |
+| `baggage` | OTel baggage | 게이트웨이가 지운다 (`AuthKeyBearer._SUBJECT_SCOPE_HEADERS`) |
 
 `x-genos-session-id` 는 genportal-api → 게이트웨이 → 코드서빙 내부 구간에서만 유지된다.
 외부 인증키로 직접 부르면 게이트웨이가 지우므로 매 요청이 새 대화가 된다.
+
+`/chat` 은 받은 헤더를 **전부** 로그로 찍는다 (`router.log_headers`). 컨테이너 로그에서
+`[total-example] 헤더` 로 찾으면 무엇이 실제로 파드까지 오는지 바로 보인다.
+
+**게이트웨이는 `traceparent` 를 만들어 주지 않는다 — 흘려보내기만 한다.** 실제 헤더 덤프로 확인했다.
+아무도 안 만들면 게이트웨이의 `code_serving` span(= admin「코드서빙 이용로그」)과 이 파드의
+`llm`·`tool.*` span 이 **서로 다른 트레이스**로 갈라져, 이용로그를 눌러도 파드 안이 안 보인다.
+그래서 호출자인 Vercel 프록시(`hyundaicapital_front/api/chat.js`)가 요청마다 `traceparent` 를 만들어 넣는다.
+게이트웨이는 이 헤더를 스크럽하지 않으므로(`gateway-api/src/utils/http.py` `get_excluded_headers`) 파드까지 그대로 온다.
+
+> 헤더에 `x-b3-traceid` 도 같이 오지만 Istio/Envoy 것이고 `x-b3-sampled: 0` 이다. Langfuse 트레이스와 무관하니 쓰지 말 것.
 
 **HITL 요소는 종류마다 모양이 다르다** (`schemas.HitlElement`).
 

@@ -3,15 +3,19 @@
 게이트웨이(CodeServingOTelFilter)는 코드서빙 호출의 **입구와 출구만** 기록한다. 그래서 이 파일이
 없으면 파드 안에서 LLM 을 몇 번 불렀는지, SQL 이 몇 초 걸렸는지, 어디서 터졌는지가 전부 안 보인다.
 
-게이트웨이가 traceparent 헤더를 실어 보내므로(aiohttp 자동 계측), 여기서 만드는 span 은 게이트웨이의
-`code_serving` span **밑에 붙는다.** 별도 트레이스가 새로 생기지 않는다.
+⚠ **게이트웨이는 traceparent 를 만들어 주지 않는다** (아웃바운드 aiohttp 계측이 suppress 돼 있다).
+호출자가 요청에 실어 보낸 것만 그대로 흘려 준다. 그래서 traceparent 생성은 호출자 몫이고,
+이 저장소에서는 Vercel 프록시(hyundaicapital_front/api/chat.js)가 요청마다 만들어 넣는다.
+traceparent 가 있으면 FastAPI 자동 계측이 그것을 extract 하므로, 여기서 만드는 span 은
+게이트웨이의 `code_serving` span 과 **같은 트레이스**에 들어간다 (부모-자식이 아니라 형제다).
+없으면 이 파드가 새 트레이스의 루트가 되어 이용로그와 갈라진다.
 
-    code_serving                       ← 게이트웨이가 만든다
-      └── POST http://code-serving-…
-            └── POST /chat             ← FastAPI 자동 계측. router.run_turn 이 여기에
-                  │                       session.id·tags 를 얹는다 (span 을 새로 만들지 않는다)
-                  ├── llm              ← graph.call_llm   (+ httpx 자동 span)
-                  └── tool.xxx         ← tools.run
+    <호출자 span>                      ← traceparent 의 parent. 실제로 export 되지는 않는다
+      ├── code_serving                 ← 게이트웨이가 만든다 = admin「코드서빙 이용로그」
+      └── POST /chat                   ← FastAPI 자동 계측. router.run_turn 이 여기에
+            │                             session.id·tags 를 얹는다 (span 을 새로 만들지 않는다)
+            ├── llm                    ← graph.call_llm   (+ httpx 자동 span)
+            └── tool.xxx               ← tools.run
 
 설계
   · 기본 꺼짐 — OTEL_ENABLED=true 일 때만 초기화한다. 그 외에는 모든 헬퍼가 no-op 이라
@@ -263,7 +267,7 @@ def current_span():
 
 
 def is_root(sp) -> bool:
-    """이 span 이 트레이스의 루트인가(부모 없음). 게이트웨이가 traceparent 를 넘기기 시작하면 False 가 된다.
+    """이 span 이 트레이스의 루트인가(부모 없음). 호출자가 traceparent 를 실어 보내면 False 가 된다.
 
     577 규칙: 트레이스 이름은 **루트일 때만** 붙인다 — 상위(게이트웨이·gen-portal)가 붙인 이름을 덮지 않는다."""
     return sp is not None and getattr(sp, "parent", None) is None

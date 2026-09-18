@@ -15,7 +15,9 @@ genportal-api 가 붙인 헤더를 게이트웨이가 화이트리스트로 골�
     x-genos-auth-key-id        인증키 ID           안 씀. 외부 인증키로 직접 호출했을 때만 있다
     x-genos-access-token       서비스 토큰         안 씀. 게이트웨이 호출에 Bearer 가 있었을 때만 있다.
                                                    코드서빙 안에서 GenOS 내부 API 를 부를 때 그대로 넘기는 용도
-    traceparent / baggage      OTel 추적           안 씀. aiohttp 계측이 자동으로 붙인다
+    traceparent / tracestate   W3C 추적 컨텍스트   직접 안 씀. FastAPI 자동 계측이 extract 해 트레이스를 잇는다.
+                                                   ⚠ 게이트웨이는 만들어 주지 않는다 — 호출자(Vercel 프록시)가 만든다
+    baggage                    OTel baggage        게이트웨이가 지운다(_SUBJECT_SCOPE_HEADERS). 오지 않는다
 
     ⚠ 위 목록은 소스(GenOS 2026-05 기준)에서 읽은 것이다. 버전에 따라 x-genos-chat-service-id 가 추가되는 등
       달라질 수 있어서, /chat 이 실제로 받은 헤더를 **전부** 매 요청 로그로 찍는다 (log_headers).
